@@ -304,7 +304,7 @@ static ParseResult parseInputOp(OpAsmParser &parser, OperationState &result) {
   Attribute idAttr;
   Type type;
 
-  Type i64Type = parser.getBuilder().getIntegerType(64);
+  Type i64Type = parser.getBuilder().getIntegerType(64, false);
 
   if (parser.parseAttribute(idAttr, i64Type, "id", attrs) ||
       parser.parseOptionalAttrDict(attrs) || parser.parseColonType(type))
@@ -335,7 +335,7 @@ static ParseResult parseNDStateOpOp(OpAsmParser &parser,
   Attribute idAttr;
   Type type;
 
-  Type i64Type = parser.getBuilder().getIntegerType(64);
+  Type i64Type = parser.getBuilder().getIntegerType(64, false);
 
   if (parser.parseAttribute(idAttr, i64Type, "id", attrs) ||
       parser.parseOptionalAttrDict(attrs) || parser.parseColonType(type))
@@ -354,7 +354,29 @@ static ParseResult parseNDStateOpOp(OpAsmParser &parser,
 // Array Operations
 //===----------------------------------------------------------------------===//
 
-template <typename Op> static LogicalResult verifyArrayOp(Op op) {
+static void printArrayOp(OpAsmPrinter &p, mlir::btor::ArrayOp &op) {
+  p << " " << op.id();
+  p << " : " << op.result().getType();
+}
+
+static ParseResult parseArrayOp(OpAsmParser &parser, OperationState &result) {
+  SmallVector<OpAsmParser::OperandType> ops;
+  NamedAttrList attrs;
+  Attribute idAttr;
+  ArrayType type;
+
+  Type i64Type = parser.getBuilder().getIntegerType(64, false);
+
+  if (parser.parseAttribute(idAttr, i64Type, "id", attrs) ||
+      parser.parseOptionalAttrDict(attrs) || parser.parseColonType(type))
+    return failure();
+
+  if (!idAttr.isa<mlir::IntegerAttr>())
+    return parser.emitError(parser.getNameLoc(),
+                            "expected integer id attribute");
+
+  result.attributes = attrs;
+  result.addTypes({type});
   return success();
 }
 
@@ -632,7 +654,8 @@ static ParseResult parseVectorReadOp(OpAsmParser &parser,
     return failure();
 
   result.addTypes(resultType);
-  indexType = parser.getBuilder().getIntegerType(log2(baseType.getShape()[0]));
+  indexType =
+      parser.getBuilder().getIntegerType(log2(baseType.getShape()[0]), false);
   return parser.resolveOperands({base, index}, {baseType, indexType},
                                 parser.getNameLoc(), result.operands);
 }
@@ -671,7 +694,141 @@ static ParseResult parseVectorWriteOp(OpAsmParser &parser,
 
   result.addTypes(resultType);
   indexType =
-      parser.getBuilder().getIntegerType(log2(resultType.getShape()[0]));
+      parser.getBuilder().getIntegerType(log2(resultType.getShape()[0]), false);
+  return parser.resolveOperands(
+      {value, base, index},
+      {resultType.getElementType(), resultType, indexType}, parser.getNameLoc(),
+      result.operands);
+}
+
+//===----------------------------------------------------------------------===//
+// Initialzied Array Operations using MemRefs
+//===----------------------------------------------------------------------===//
+
+static void printMemRefInitArrayOp(OpAsmPrinter &p, MemRefInitArrayOp &op) {
+  // p << " " << op.init();
+  p.printOptionalAttrDict(op->getAttrs());
+  p << " : " << op.result().getType();
+}
+
+template <typename Op> static LogicalResult verifyMemRefInitArrayOp(Op op) {
+  // auto initType = op.init().getType();
+  // auto initWidth = initType.getIntOrFloatBitWidth();
+  // auto elementType = op.getArrayType().getElementType();
+  // if (elementType.getIntOrFloatBitWidth() != initWidth) {
+  //   return op.emitOpError() << "element type of the array must match "
+  //                           << " bitwidth of given value: " << initWidth;
+  // }
+  // if (op.getArrayType().getShape().size() != 1) {
+  //   return op.emitOpError() << "provide only one shape attribute ";
+  // }
+  // auto shape = op.getArrayType().getShape()[0];
+  // auto indicator = shape & (shape - 1);
+  // if (indicator != 0) {
+  //   return op.emitOpError()
+  //          << "given shape: " << shape << " has to be a power of two";
+  // }
+  return success();
+}
+
+static ParseResult parseMemRefInitArrayOp(OpAsmParser &parser,
+                                          OperationState &result) {
+  OpAsmParser::OperandType init;
+  MemRefType resultType;
+  if (
+      // parser.parseOperand(init) ||
+      parser.parseOptionalAttrDict(result.attributes) || parser.parseColon() ||
+      parser.parseType(resultType))
+    return failure();
+
+  result.addTypes(resultType);
+  return parser.resolveOperands({}, {}, parser.getNameLoc(), result.operands);
+}
+
+//===----------------------------------------------------------------------===//
+// Read Operations using MemRefs
+//===----------------------------------------------------------------------===//
+
+static void printMemRefReadOp(OpAsmPrinter &p, MemRefReadOp &op) {
+  p << " " << op.base() << "[" << op.index() << "]";
+  p.printOptionalAttrDict(op->getAttrs());
+  p << " : " << op.base().getType() << ", " << op.result().getType();
+}
+
+template <typename Op> static LogicalResult verifyMemRefReadOp(Op op) {
+  auto type = op.result().getType().getIntOrFloatBitWidth();
+  // The value's type must match the return type.
+  if (op.getArrayType().getElementType().getIntOrFloatBitWidth() != type) {
+    return op.emitOpError() << "element type of the array must match "
+                            << " bitwidth of return type: " << type;
+  }
+  if (op.getArrayType().getShape().size() != 1) {
+    return op.emitOpError() << "provide only one shape attribute ";
+  }
+  auto shape = op.getArrayType().getShape()[0];
+  auto indicator = shape & (shape - 1);
+  if (indicator != 0) {
+    return op.emitOpError()
+           << "given shape: " << shape << " has to be a power of two";
+  }
+  return success();
+}
+
+static ParseResult parseMemRefReadOp(OpAsmParser &parser,
+                                     OperationState &result) {
+  OpAsmParser::OperandType base, index;
+  MemRefType baseType;
+  IntegerType indexType;
+  Type resultType;
+  if (parser.parseOperand(base) || parser.parseLSquare() ||
+      parser.parseOperand(index) || parser.parseRSquare() ||
+      parser.parseOptionalAttrDict(result.attributes) || parser.parseColon() ||
+      parser.parseType(baseType) || parser.parseOptionalComma() ||
+      parser.parseType(resultType))
+    return failure();
+
+  result.addTypes(resultType);
+  indexType =
+      parser.getBuilder().getIntegerType(log2(baseType.getShape()[0]), false);
+  return parser.resolveOperands({base, index}, {baseType, indexType},
+                                parser.getNameLoc(), result.operands);
+}
+
+//===----------------------------------------------------------------------===//
+// Write Operations using MemRefs
+//===----------------------------------------------------------------------===//
+
+void printMemRefWriteOp(OpAsmPrinter &p, MemRefWriteOp &op) {
+  p << " " << op.value() << ", " << op.base() << "[" << op.index() << "]";
+  p.printOptionalAttrDict(op->getAttrs());
+  p << " : " << op.result().getType();
+}
+
+template <typename Op> LogicalResult verifyMemRefWriteOp(Op op) {
+  auto type = op.value().getType().getIntOrFloatBitWidth();
+  // The value's type must match the array's element type.
+  if (op.getArrayType().getElementType().getIntOrFloatBitWidth() != type) {
+    return op.emitOpError() << "element type of the array must match "
+                            << " bitwidth of given value: " << type;
+  }
+  return success();
+}
+
+static ParseResult parseMemRefWriteOp(OpAsmParser &parser,
+                                      OperationState &result) {
+  OpAsmParser::OperandType value, base, index;
+  MemRefType resultType;
+  IntegerType indexType;
+  if (parser.parseOperand(value) || parser.parseComma() ||
+      parser.parseOperand(base) || parser.parseLSquare() ||
+      parser.parseOperand(index) || parser.parseRSquare() ||
+      parser.parseOptionalAttrDict(result.attributes) || parser.parseColon() ||
+      parser.parseType(resultType))
+    return failure();
+
+  result.addTypes(resultType);
+  indexType =
+      parser.getBuilder().getIntegerType(log2(resultType.getShape()[0]), false);
   return parser.resolveOperands(
       {value, base, index},
       {resultType.getElementType(), resultType, indexType}, parser.getNameLoc(),

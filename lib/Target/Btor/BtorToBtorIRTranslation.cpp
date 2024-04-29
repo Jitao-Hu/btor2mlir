@@ -553,7 +553,8 @@ Deserialize::buildNextFunction(const std::vector<Type> &returnTypes,
       auto stateType = getFromCacheById(m_states.at(i)->id).getType();
       auto res = m_builder.create<btor::NDStateOp>(
           FileLineColLoc::get(m_sourceFile, m_states.at(i)->lineno, 0),
-          stateType, m_builder.getIntegerAttr(m_builder.getIntegerType(64), i));
+          stateType,
+          m_builder.getIntegerAttr(m_builder.getIntegerType(64, false), i));
       assert(res);
       assert(res->getNumResults() == 1);
       results[i] = res->getResult(0);
@@ -574,7 +575,8 @@ OwningOpRef<FuncOp> Deserialize::buildMainFunction() {
   }
   // create main function
   OperationState state(m_unknownLoc, FuncOp::getOperationName());
-  FuncOp::build(m_builder, state, "main", FunctionType::get(m_context, {}, {}));
+  FuncOp::build(m_builder, state, "_main",
+                FunctionType::get(m_context, {}, {}));
   OwningOpRef<FuncOp> funcOp = cast<FuncOp>(Operation::create(state));
   Region &region = funcOp->getBody();
   OpBuilder::InsertionGuard guard(m_builder);

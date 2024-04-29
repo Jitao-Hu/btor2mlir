@@ -260,13 +260,6 @@ struct SRemOpLowering : public ConvertOpToLLVMPattern<btor::SRemOp> {
 // Array Operations
 //===----------------------------------------------------------------------===//
 
-struct ArrayOpLowering : public ConvertOpToLLVMPattern<mlir::btor::ArrayOp> {
-  using ConvertOpToLLVMPattern<mlir::btor::ArrayOp>::ConvertOpToLLVMPattern;
-  LogicalResult
-  matchAndRewrite(mlir::btor::ArrayOp arrayOp, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override;
-};
-
 struct InitArrayOpLowering
     : public ConvertOpToLLVMPattern<mlir::btor::InitArrayOp> {
   using ConvertOpToLLVMPattern<mlir::btor::InitArrayOp>::ConvertOpToLLVMPattern;
@@ -298,16 +291,6 @@ struct WriteOpLowering : public ConvertOpToLLVMPattern<mlir::btor::WriteOp> {
 LogicalResult
 ConstantOpLowering::matchAndRewrite(btor::ConstantOp op, OpAdaptor adaptor,
                                     ConversionPatternRewriter &rewriter) const {
-  // auto resultType = op.getResult().getType();
-  // auto intType = typeConverter->convertType(resultType);
-
-  // unsigned val = op.valueAttr().getValue().getSExtValue();
-
-  // rewriter.replaceOpWithNewOp<LLVM::ConstantOp>(
-  //     op, intType, rewriter.getIntegerAttr(intType, val));
-
-  // return success();
-
   return LLVM::detail::oneToOneRewrite(op, LLVM::ConstantOp::getOperationName(),
                                        adaptor.getOperands(),
                                        *getTypeConverter(), rewriter);
@@ -372,23 +355,28 @@ LogicalResult AssertNotOpLowering::matchAndRewrite(
   auto verifierAssert = "__VERIFIER_assert";
   auto verifierAssertFunc =
       module.lookupSymbol<LLVM::LLVMFuncOp>(verifierAssert);
+  auto tracker = "__TRACKER";
+  auto trackerFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(tracker);
   if (!verifierErrorFunc) {
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(module.getBody());
-    auto verifierErrorFuncTy =
+    auto voidNoArgFuncTy =
         LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(getContext()), {});
     verifierErrorFunc = rewriter.create<LLVM::LLVMFuncOp>(
-        rewriter.getUnknownLoc(), verifierError, verifierErrorFuncTy);
+        rewriter.getUnknownLoc(), verifierError, voidNoArgFuncTy);
     auto verifierAssertFuncTy = LLVM::LLVMFunctionType::get(
         LLVM::LLVMVoidType::get(getContext()), {notBad.getType(), i64Type});
     verifierAssertFunc = rewriter.create<LLVM::LLVMFuncOp>(
         rewriter.getUnknownLoc(), verifierAssert, verifierAssertFuncTy);
+    trackerFunc = rewriter.create<LLVM::LLVMFuncOp>(rewriter.getUnknownLoc(),
+                                                    tracker, voidNoArgFuncTy);
   }
 
   // Split block at `assert` operation.
   Block *opBlock = rewriter.getInsertionBlock();
   auto opPosition = rewriter.getInsertionPoint();
   Block *continuationBlock = rewriter.splitBlock(opBlock, opPosition);
+  rewriter.create<LLVM::CallOp>(loc, trackerFunc, llvm::None);
 
   // Generate IR to call `abort`.
   Block *failureBlock = rewriter.createBlock(opBlock->getParent());
@@ -397,6 +385,7 @@ LogicalResult AssertNotOpLowering::matchAndRewrite(
   rewriter.create<LLVM::CallOp>(loc, verifierAssertFunc,
                                 ValueRange({notBad, propertyNumber}));
   rewriter.create<LLVM::CallOp>(loc, verifierErrorFunc, llvm::None);
+  rewriter.create<LLVM::CallOp>(loc, trackerFunc, llvm::None);
   rewriter.create<LLVM::UnreachableOp>(loc);
 
   // Generate assertion test.
@@ -755,39 +744,6 @@ URemOpLowering::matchAndRewrite(mlir::btor::URemOp op, OpAdaptor adaptor,
 }
 
 //===----------------------------------------------------------------------===//
-// ArrayOpLowering
-//===----------------------------------------------------------------------===//
-
-LogicalResult
-ArrayOpLowering::matchAndRewrite(mlir::btor::ArrayOp arrayOp, OpAdaptor adaptor,
-                                 ConversionPatternRewriter &rewriter) const {
-  auto opType = arrayOp.getArrayType();
-  // Insert the `havoc` declaration if necessary.
-  auto module = arrayOp->getParentOfType<ModuleOp>();
-  std::string havoc;
-  havoc.append("nd_array");
-  havoc.append(std::to_string(opType.getShape().getWidth()));
-  havoc.append("xbv");
-  auto eleType = opType.getElement();
-  havoc.append(std::to_string(eleType.getWidth()));
-  auto havocFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(havoc);
-  if (!havocFunc) {
-    OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointToStart(module.getBody());
-    auto havocFuncTy =
-        LLVM::LLVMFunctionType::get(typeConverter->convertType(opType), {});
-    havocFunc = rewriter.create<LLVM::LLVMFuncOp>(rewriter.getUnknownLoc(),
-                                                  havoc, havocFuncTy);
-  }
-  auto callOp =
-      rewriter.create<LLVM::CallOp>(arrayOp.getLoc(), havocFunc, llvm::None);
-  auto result = callOp.getResult(0);
-  arrayOp.replaceAllUsesWith(result);
-  rewriter.replaceOp(arrayOp, result);
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
 // Pass Definition
 //===----------------------------------------------------------------------===//
 
@@ -810,7 +766,7 @@ struct BtorToLLVMLoweringPass
 void BtorToLLVMLoweringPass::runOnOperation() {
   LLVMConversionTarget target(getContext());
   RewritePatternSet patterns(&getContext());
-  BtorToLLVMTypeConverter converter(&getContext());
+  BtorToLLVMTypeConverter converter(&getContext(), true);
 
   mlir::btor::populateBtorToLLVMConversionPatterns(converter, patterns);
   mlir::populateStdToLLVMConversionPatterns(converter, patterns);
@@ -872,8 +828,8 @@ void mlir::btor::populateBtorToLLVMConversionPatterns(
       IffOpLowering, ImpliesOpLowering, XnorOpLowering, NandOpLowering,
       NorOpLowering, IncOpLowering, DecOpLowering, NegOpLowering,
       RedOrOpLowering, RedAndOpLowering, RedXorOpLowering, UExtOpLowering,
-      SExtOpLowering, SliceOpLowering, ConcatOpLowering, ConstraintOpLowering,
-      ArrayOpLowering>(converter);
+      SExtOpLowering, SliceOpLowering, ConcatOpLowering, ConstraintOpLowering>(
+      converter);
 }
 
 /// Create a pass for lowering operations the remaining `Btor` operations

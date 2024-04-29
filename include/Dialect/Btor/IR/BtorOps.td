@@ -1059,6 +1059,96 @@ def VectorWriteOp : Btor_Op<"write_vec"> {
 }
 
 //===----------------------------------------------------------------------===//
+// MemRef using Btor arrays
+//===----------------------------------------------------------------------===//
+
+def MemRefInitArrayOp : Btor_Op<"array_mem"> {
+  let summary = "btor initialized array allocation using memref types";
+  // clang-format off
+  let description = [{
+    The `array` operation represents a btor array, using memrefs,
+    that has been initialized with a value.
+
+    For example:
+
+    ```mlir
+    %4 = btor.array_mem %1: memref<8xi32>
+    ```
+    This operation returns a single SSA value of a memref type
+    used by subsequent read and write operations.
+  }];
+  let arguments = (ins Builtin_IntegerAttr : $init);
+  let results = (outs AnyMemRef : $result);
+  let extraClassDeclaration = [{
+    MemRefType getArrayType() {
+      return result().getType().cast<MemRefType>();
+    }
+  }];
+  let verifier = [{ return verifyMemRefInitArrayOp(*this); }];
+  let parser = [{ return parseMemRefInitArrayOp(parser, result); }];
+  let printer = [{ return printMemRefInitArrayOp(p, *this); }];
+// clang-format on
+}
+
+def MemRefReadOp : Btor_Op<"read_mem"> {
+  let summary = "btor read operation using memref types";
+  // clang-format off
+  let description = [{
+    The `read` op reads an element from a btor array specified by an index.
+    The output of load is a new value with the same type as the elements
+    of the btor array.
+
+    Example:
+
+    ```mlir 
+    %1 = btor.read %A[%0]: memref<8xi32>, i32
+    ```
+  }];
+
+  let arguments = (ins AnyMemRef : $base,
+                      SignlessIntegerLike : $index);
+  let results = (outs SignlessIntegerLike : $result);
+  let extraClassDeclaration = [{
+    MemRefType getArrayType() {
+      return base().getType().cast<MemRefType>();
+    }
+  }];
+  let verifier = [{ return verifyMemRefReadOp(*this); }];
+  let parser = [{ return parseMemRefReadOp(parser, result); }];
+  let printer = [{ return printMemRefReadOp(p, *this); }];
+// clang-format on
+}
+
+def MemRefWriteOp : Btor_Op<"write_mem"> {
+  let summary = "btor write operation with memref types";
+  // clang-format off
+  let description = [{
+    Copy the given array and write the given value to the provided location
+    given by index.The value stored should have the same type as the 
+    elemental type of the array.Example:
+
+    ```mlir
+    %4 = btor.write %2, %A[%1]: memref<8xi32>
+    ```
+  }];
+
+  let arguments = (ins SignlessIntegerLike: $value,
+                    AnyMemRef: $base, 
+                    SignlessIntegerLike: $index);
+
+  let results = (outs AnyMemRef : $result);
+  let extraClassDeclaration = [{
+    MemRefType getArrayType() {
+      return base().getType().cast<MemRefType>();
+    }
+  }];
+  let verifier = [{ return verifyMemRefWriteOp(*this); }];
+  let parser = [{ return parseMemRefWriteOp(parser, result); }];
+  let printer = [{ return printMemRefWriteOp(p, *this); }];
+// clang-format on
+}
+
+//===----------------------------------------------------------------------===//
 // Btor arrays
 //===----------------------------------------------------------------------===//
 
@@ -1077,14 +1167,15 @@ def ArrayOp : Btor_Op<"nd_array"> {
     by subsequent read and write operations. 
   }];
 
+  let arguments = (ins AnyI64Attr : $id);
   let results = (outs Btor_Array : $result);
   let extraClassDeclaration = [{
     ArrayType getArrayType() {
       return result().getType().cast<ArrayType>();
     }
   }];
-  let assemblyFormat = "attr-dict `:` qualified(type($result))";
-  let verifier = [{ return verifyArrayOp(*this); }];
+  let parser = [{ return parseArrayOp(parser, result); }];
+  let printer = [{ return printArrayOp(p, *this); }];
 // clang-format on
 }
 
